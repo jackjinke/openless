@@ -50,6 +50,11 @@ on:
         type: string
         required: false
         default: ''
+      artifact_acceptance_run:
+        description: Existing immutable ARM run for capsule-only acceptance (no build or publish)
+        type: string
+        required: false
+        default: ''
 
 # Equivalent manual branch builds cancel the older run so duplicate DMG builds
 # do not stack. Different platform/diagnostic requests stay independent.
@@ -84,7 +89,7 @@ jobs:
   build:
     needs: prepare-release
     # Branch/manual desktop builds still run when the tag-only preflight is skipped.
-    if: ${{ !cancelled() && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
+    if: ${{ inputs.artifact_acceptance_run == '' && !cancelled() && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
     # Read-only. Tag and repair publishes run in `publish`, which is the only
     # job that needs contents: write. The tag/repair guard stays on that job.
     permissions:
@@ -824,6 +829,63 @@ jobs:
   # leg failed, so a good platform can still attach. A cancelled build publishes
   # nothing. Updater manifests stay in the `*-updater` artifacts for the CDN and
   # are not copied into the release.
+  artifact-capsule-acceptance:
+    name: Verify existing ARM capsule artifact
+    if: github.event_name == 'workflow_dispatch' && inputs.artifact_acceptance_run != ''
+    runs-on: macos-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Validate immutable artifact source and scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN: ${{ inputs.artifact_acceptance_run }}
+          PLATFORM: ${{ inputs.platform }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$ORIGINAL_RUN" == 45134381144 && "$PLATFORM" == macos-aarch64 && -z "$RELEASE_TAG" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN" --jq .head_sha)" == 14a92a33b3542be3543fd62ffbf5e4ced5263b2e ]]
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Download the original updater artifact only on the cloud runner
+        uses: actions/download-artifact@v4
+        with:
+          name: openless-macos-aarch64-updater
+          run-id: ${{ inputs.artifact_acceptance_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/original-updater
+      - name: Record original App provenance without modifying or relaunching it
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/original-app" "$RUNNER_TEMP/capsule-supplement"
+          tar -xzf "$RUNNER_TEMP/original-updater/OpenLess_aarch64.app.tar.gz" -C "$RUNNER_TEMP/original-app"
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/original-app/OpenLess.app/Contents/Info.plist")
+          [[ "$version" == 2.0.3-dev.noask.20261123.capsule.9f406c62 ]]
+          echo "original_run=45134381144 original_app_sha=14a92a33b3542be3543fd62ffbf5e4ced5263b2e version=$version" | tee "$RUNNER_TEMP/capsule-supplement/provenance.txt"
+      - name: Install fixture dependencies
+        working-directory: openless-all/app
+        run: npm ci
+      - name: Supplement only the pending native WK capsule checks
+        working-directory: openless-all/app
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/capsule-supplement"
+          npx vite --host 127.0.0.1 --port 5177 --strictPort > "$evidence/fixture-server.log" 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
+          swift scripts/capsule-stacking-webkit.swift 'http://127.0.0.1:5177/e2e/fixtures/capsule-motion.html?full&os=mac&transcript' "$evidence" | tee "$evidence/result.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: original-arm-capsule-supplement
+          path: ${{ runner.temp }}/capsule-supplement/
+          retention-days: 14
+
   publish:
     name: Publish Tauri release
     # Same lock as Android: merge/upload one shared signature index without races.
