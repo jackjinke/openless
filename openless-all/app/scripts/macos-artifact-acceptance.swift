@@ -15,7 +15,7 @@ let expectedVersion = args[2]
 let evidence = URL(fileURLWithPath: args[3])
 try FileManager.default.createDirectory(at: evidence, withIntermediateDirectories: true)
 let started = Date()
-let process = Process()
+var process = Process()
 var fields: [String: String] = ["status": "incomplete", "runtime_sha": "not_probed"]
 var events: [String] = []
 func record(_ message: String) {
@@ -148,6 +148,37 @@ func press(_ node: Node, _ label: String) {
     record("AXPress \(label) result=\(error.rawValue)")
     guard error == .success else { finish("BLOCKED", "AXPress_failed: \(label)") }
 }
+let preferencesURL = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/OpenLess/preferences.json")
+func savedShiftCount() -> Int? {
+    guard let data = try? Data(contentsOf: preferencesURL),
+          let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+    return (value["translationShiftTapCount"] as? NSNumber)?.intValue
+}
+func shiftControl(_ tree: [Node]) -> Node? {
+    tree.first { node in
+        [kAXPopUpButtonRole, kAXComboBoxRole, kAXButtonRole].contains(node.role)
+            && (node.text.contains("Shift tap count") || node.text.contains("Shift 连按次数"))
+    }
+}
+// Option text may be exposed as static text in WKWebView. Click its actual AX bounds.
+func clickOption(_ node: Node) {
+    guard let position = attribute(node.element, kAXPositionAttribute),
+          let size = attribute(node.element, kAXSizeAttribute),
+          CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID()
+    else { finish("BLOCKED", "option_bounds_missing") }
+    var point = CGPoint.zero
+    var extent = CGSize.zero
+    guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+          AXValueGetValue(size as! AXValue, .cgSize, &extent), extent.width > 0, extent.height > 0
+    else { finish("BLOCKED", "invalid_option_bounds") }
+    point.x += extent.width / 2
+    point.y += extent.height / 2
+    NSRunningApplication(processIdentifier: process.processIdentifier)?.activate(options: [.activateIgnoringOtherApps])
+    for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+    }
+}
 // Save an early observation for direct comparison to the old window-only probe.
 let windowDeadline = Date().addingTimeInterval(35)
 while process.isRunning && window() == nil && Date() < windowDeadline {
@@ -185,13 +216,67 @@ guard let settings = button(tree, labels: ["Settings", "设置"]) else { finish(
 press(settings, "Settings")
 tree = waitFor("settings") { button($0, labels: ["About & updates", "关于与更新"]) != nil }
 guard let translation = button(tree, labels: ["Recording translation", "录音翻译"]) else { finish("BLOCKED", "recording_translation_entry_missing") }
+capture("general-translation-icon")
 press(translation, "Recording translation")
-tree = waitFor("recording-translation") { $0.contains { $0.text.contains("Shift tap count") || $0.text.contains("Shift 连按次数") } }
+tree = waitFor("recording-translation") { shiftControl($0) != nil }
 fields["recording_translation"] = "settings_entry_and_Shift_tap_count_visible"
 capture("recording-translation")
+guard savedShiftCount() == nil else { finish("FAIL", "first_save_profile_already_configured") }
+for count in [2, 3, 1] {
+    guard let control = shiftControl(tree) else { finish("FAIL", "tap_count_control_missing") }
+    press(control, "Shift tap count")
+    let labels = [count == 1 ? "1 tap" : "\(count) taps", "\(count) 次"]
+    func option(_ current: [Node]) -> Node? {
+        current.first { node in
+            node.text.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+                .contains(where: { labels.contains($0) })
+        }
+    }
+    tree = waitFor("tap-option-\(count)") { option($0) != nil }
+    clickOption(option(tree)!)
+    tree = waitFor("tap-saved-\(count)", seconds: 15) { current in
+        if current.contains(where: { $0.text.contains("unknown preference:") }) {
+            finish("FAIL", "native_preference_patch_rejected")
+        }
+        return savedShiftCount() == count && shiftControl(current)?.text.contains(labels[0]) == true
+            || savedShiftCount() == count && shiftControl(current)?.text.contains(labels[1]) == true
+    }
+    record("native_setting_saved=\(count)")
+}
+fields["translation_first_save"] = "absent_to_2_to_3_to_explicit_1_persisted"
 press(button(tree, labels: ["About & updates", "关于与更新"])!, "About & updates")
 tree = waitFor("about-version") { $0.contains { $0.text.contains(expectedVersion) } }
 fields["ui_version"] = expectedVersion
 fields["settings_navigation"] = "about_page_version_verified"
 guard !capture("about-version").isEmpty else { finish("BLOCKED", "screenshot_or_OCR_unavailable") }
-finish("PASS", "content_initialized; main_nonblank; Ask_disabled; settings_navigation_and_version_verified")
+// Restart the same final app and read the setting through its real native backend.
+let prior = process
+prior.terminate()
+let stopDeadline = Date().addingTimeInterval(10)
+while prior.isRunning && Date() < stopDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+guard !prior.isRunning else { finish("BLOCKED", "app_did_not_stop_for_reopen") }
+process = Process()
+process.executableURL = executable
+process.currentDirectoryURL = prior.currentDirectoryURL
+process.environment = prior.environment
+process.standardInput = FileHandle.nullDevice
+process.standardOutput = prior.standardOutput
+process.standardError = prior.standardError
+do { try process.run() } catch { finish("FAIL", "reopen_failed: \(error)") }
+tree = waitFor("reopened-main") {
+    button($0, labels: ["Settings", "设置", "General", "通用"]) != nil
+}
+if let settings = button(tree, labels: ["Settings", "设置"]) {
+    press(settings, "Settings after restart")
+    tree = waitFor("reopened-settings") { button($0, labels: ["General", "通用"]) != nil }
+}
+if let general = button(tree, labels: ["General", "通用"]) { press(general, "General after restart") }
+tree = waitFor("reopened-general") { button($0, labels: ["Recording translation", "录音翻译"]) != nil }
+press(button(tree, labels: ["Recording translation", "录音翻译"])!, "Recording translation after restart")
+tree = waitFor("reopened-tap-count") { current in
+    guard let control = shiftControl(current) else { return false }
+    return savedShiftCount() == 1 && (control.text.contains("1 tap") || control.text.contains("1 次"))
+}
+fields["translation_restart"] = "explicit_1_visible_and_persisted"
+capture("recording-translation-after-restart")
+finish("PASS", "content_initialized; main_nonblank; Ask_disabled; native_translation_first_save_and_restart_verified")

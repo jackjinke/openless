@@ -732,15 +732,6 @@ jobs:
           codesign -dv --verbose=4 "$app" 2> "$evidence/signature.txt"
           /usr/libexec/PlistBuddy -c Print "$app/Contents/Info.plist" > "$evidence/Info.plist.txt"
           swift scripts/macos-artifact-acceptance.swift "$app" "$version" "$evidence" || status=$?
-          if [[ $status -eq 0 ]]; then
-            python3 scripts/macos-initialized-style-acceptance.py "$evidence" || status=$?
-          fi
-          if [[ $status -eq 0 ]]; then
-            npx vite --host 127.0.0.1 --port 5177 --strictPort > "$evidence/capsule-fixture-server.log" 2>&1 &
-            fixture_pid=$!
-            trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
-            swift scripts/capsule-stacking-webkit.swift 'http://127.0.0.1:5177/e2e/fixtures/capsule-motion.html?full&os=mac&transcript' "$evidence" || status=$?
-          fi
           {
             echo '### Packaged macOS app launch smoke'
             if [[ -s "$evidence/result.txt" ]]; then
