@@ -67,6 +67,19 @@ Task { @MainActor in
         try await capture("translation-after-stop")
         let pendingLabel = try await evaluate("document.querySelector('.ol-classic-translation').textContent.trim()") as? String
         precondition(pendingLabel == "正在翻译")
+        _ = try await evaluate("window.fixture.emit('dictation:jobs',[{sessionId:'old-b',translationActive:true}])")
+        try await settle()
+        let rearValid = try await evaluate("""
+        (()=>{let rear=document.querySelector('.ol-processing-satellite'),r=rear.getBoundingClientRect(),f=document.querySelector('.ol-default-capsule').getBoundingClientRect();
+          return Math.abs(r.height-22)<1 && Math.abs(r.x+r.width/2-f.x-f.width/2)<1 && Math.abs(r.bottom-f.y-4)<1
+            && rear.textContent.includes('正在翻译') && window.fixture.inputRegions.some(q=>q.top<=r.top+1 && q.top+q.height>=f.top-1)})()
+        """) as? Bool
+        precondition(rearValid == true, "New rear geometry or published input region mismatch")
+        _ = try await evaluate("document.querySelector('.ol-processing-satellite').click()")
+        let ownerValid = try await evaluate("window.fixture.dictationActionArgs.at(-1).sessionId==='old-b'") as? Bool
+        precondition(ownerValid == true, "Background cancellation owner mismatch")
+        evidence["processingForegroundOverlap"] = try await evaluate("window.geometry()")
+        try await capture("processing-foreground-overlap")
         try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted,.sortedKeys]).write(to: output.appendingPathComponent("native-webkit-geometry.json"))
         for name in ["overlap", "menu", "after"] {
             for selector in [".ol-default-capsule", ".ol-capsule-transcript-rail", ".ol-classic-translation"] {
@@ -75,7 +88,7 @@ Task { @MainActor in
                 precondition(before.isEqual(current), "Moved \(selector) in \(name)")
             }
         }
-        print("PASS: native WKWebView captured before, overlap, menu, after; foreground, transcript and translation coordinates unchanged")
+        print("PASS: native WKWebView anchors unchanged; centered 22px rear with 4px overlap, settled input region and directed cancellation verified")
         app.terminate(nil)
     } catch { print("FAIL: \(error)"); exit(1) }
 }
