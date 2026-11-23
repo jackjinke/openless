@@ -6,7 +6,11 @@ import WebKit
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let output = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
-let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 460, height: 492))
+let configuration = WKWebViewConfiguration()
+configuration.userContentController.addUserScript(WKUserScript(
+    source: "localStorage.setItem('ol.locale','zh-CN');",
+    injectionTime: .atDocumentStart, forMainFrameOnly: true))
+let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 460, height: 492), configuration: configuration)
 let window = NSWindow(contentRect: web.frame, styleMask: [.borderless], backing: .buffered, defer: false)
 window.contentView = web
 window.orderBack(nil)
@@ -66,7 +70,8 @@ Task { @MainActor in
         try await settle()
         try await capture("translation-after-stop")
         let pendingLabel = try await evaluate("document.querySelector('.ol-classic-translation-label').textContent.trim()") as? String
-        precondition(pendingLabel == "正在翻译")
+        print("WK foreground translation label: \(pendingLabel ?? "missing")")
+        precondition(pendingLabel == "正在翻译", "Expected explicit zh-CN fixture translation label")
         _ = try await evaluate("window.fixture.emit('dictation:jobs',[{sessionId:'old-b',translationActive:true}])")
         try await settle()
         let rearValid = try await evaluate("""
