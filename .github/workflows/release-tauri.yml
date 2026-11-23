@@ -863,7 +863,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/original-app" "$RUNNER_TEMP/capsule-supplement"
-          tar -xzf "$RUNNER_TEMP/original-updater/OpenLess_aarch64.app.tar.gz" -C "$RUNNER_TEMP/original-app"
+          tar -xzf "$RUNNER_TEMP/original-updater/macos/OpenLess_aarch64.app.tar.gz" -C "$RUNNER_TEMP/original-app"
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/original-app/OpenLess.app/Contents/Info.plist")
           [[ "$version" == 2.0.3-dev.noask.20261123.capsule.9f406c62 ]]
           echo "original_run=45134381144 original_app_sha=14a92a33b3542be3543fd62ffbf5e4ced5263b2e version=$version" | tee "$RUNNER_TEMP/capsule-supplement/provenance.txt"
